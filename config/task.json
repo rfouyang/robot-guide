@@ -1,0 +1,33 @@
+{
+  "version": 1,
+  "tasks": [
+    {
+      "id": "2331cff2-757b-4b91-824b-17614cac0065",
+      "name": "guide",
+      "stops": [
+        {
+          "poi_id": "2341e99a-6356-4eb7-9798-69c3f2446c20",
+          "poi_name": "Welcome Center",
+          "content": "Hello, I am Tianyi. Welcome to our Research Translation Lab. Here, we focus on humanoid robotics research and development, including areas such as manipulation and whole-body control, with applications in public safety, healthcare, and logistics. Let me show you some of our work in more detail."
+        },
+        {
+          "poi_id": "0dd766bb-f948-4b1c-a5e7-3e2e20ee8fb0",
+          "poi_name": "Teleoperation",
+          "content": "On my right, you can see our teleoperation equipment. Our engineers use it to control the humanoid robot and perform pick-and-place tasks. During this process, camera video and robot joint data are collected and later used to train the robot to perform these tasks autonomously."
+        },
+        {
+          "poi_id": "17022224-18ae-4a65-9499-52ee5a39d815",
+          "poi_name": "Demo Explain",
+          "content": "Now, behind me is our demo table. On the table, you can see a food tray. Hospitals are interested in using humanoid robots to handle and deliver meal trays directly to patients at their bedside. Let me demonstrate how the robot can perform this task."
+        },
+        {
+          "poi_id": "d06b58d8-c956-4ac7-8df8-712a3290d4d6",
+          "poi_name": "Demo Table",
+          "content": "Okay, now I’m in position and ready for the demo. Let me get started. And don’t forget to give me a round of applause when I finish the task!"
+        }
+      ],
+      "created_at": "2026-08-28T05:52:06.497880+00:00",
+      "updated_at": "2026-08-28T05:52:06.497880+00:00"
+    }
+  ]
+}
