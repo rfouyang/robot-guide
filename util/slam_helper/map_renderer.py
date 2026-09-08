@@ -42,11 +42,20 @@ class MapRenderer:
 
         home_dock = map_info.get("home_dock")
         if home_dock is not None:
-            MapRenderer.draw_home_dock(
-                pixels,
-                metadata,
-                home_dock.get("pose", home_dock),
+            pose = (
+                home_dock.get("pose", home_dock)
+                if isinstance(home_dock, dict)
+                else None
             )
+            if MapRenderer.is_xy_pose(pose):
+                MapRenderer.draw_home_dock(pixels, metadata, pose)
+            else:
+                # A mapping run can outlive a browser session.  In that case
+                # the UI may only know the dock ID, not its pose.  The map is
+                # still useful, so omit the marker instead of crashing.
+                logger.warning(
+                    "Skipping home-dock marker: robot did not provide x/y pose"
+                )
 
         for wall in map_info.get("walls", []):
             MapRenderer.draw_virtual_wall(pixels, metadata, wall)
@@ -63,6 +72,11 @@ class MapRenderer:
             metadata["width"],
             3,
         ).copy()
+
+    @staticmethod
+    def is_xy_pose(pose):
+        """Return whether *pose* has the minimum data needed to draw a marker."""
+        return isinstance(pose, dict) and "x" in pose and "y" in pose
 
     @staticmethod
     def set_pixel(pixels, width, height, x, y, color):

@@ -33,7 +33,13 @@ Edit `.env`:
 BYTEPLUS_API_KEY=your_byteplus_api_key
 ```
 
-The robot API address is configured in `util/slam_helper/base.py`.
+Set the robot REST API address in `.env` (the default is shown below):
+
+```env
+SLAM_BASE_URL=http://192.168.11.1:1448
+```
+
+The API must be reachable from the machine that runs the UI.
 
 ## Run the UI
 

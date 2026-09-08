@@ -58,6 +58,7 @@ def start_build_map(filename, dock_name, confirmed, session):
         gr.update(interactive=False),
         gr.update(interactive=False),
         gr.update(interactive=True),
+        gr.update(interactive=False),
     )
 
 
@@ -82,6 +83,32 @@ def finish_build_map(session):
         gr.update(interactive=True),
         gr.update(interactive=False),
         gr.update(value=False),
+        gr.update(interactive=True),
+    )
+
+
+def stop_existing_mapping(session):
+    """Recover after a browser restart left mapping active on the robot."""
+    if session and session.get("active"):
+        raise gr.Error("Use Finish Build Map for the map-building session in this browser")
+
+    try:
+        MAP_BUILD_SERVICE.stop_active_mapping()
+        image, status = _get_view(None)
+    except Exception as exc:
+        logger.exception("Failed to stop existing map building")
+        raise gr.Error(str(exc)) from exc
+
+    return (
+        {"active": False},
+        image,
+        _status_text(status),
+        status["pose"],
+        status["power"],
+        status.get("home_dock"),
+        gr.update(interactive=True),
+        gr.update(interactive=False),
+        gr.update(interactive=False),
     )
 
 
@@ -157,6 +184,11 @@ def build_map_building_tab():
     with gr.Row():
         start_button = gr.Button("Start Build Map", variant="primary")
         finish_button = gr.Button("Finish Build Map", interactive=False)
+        stop_existing_button = gr.Button(
+            "Stop Existing Mapping",
+            variant="stop",
+            interactive=True,
+        )
 
     status_text = gr.Markdown(
         "**Ready.** Waiting to start from a confirmed charging dock."
@@ -164,6 +196,11 @@ def build_map_building_tab():
     gr.Markdown(
         "**Legend:** 🔵 initial mapping pose · 🟩 charging dock · "
         "🔴 current robot pose"
+    )
+    gr.Markdown(
+        "If the UI was restarted while a map build was running, use **Stop "
+        "Existing Mapping** before starting a replacement build. This pauses "
+        "mapping but does not clear or save its current in-memory map."
     )
 
     with gr.Row():
@@ -215,6 +252,7 @@ def build_map_building_tab():
             dock_name,
             start_button,
             finish_button,
+            stop_existing_button,
         ],
         concurrency_id="guide-robot",
         concurrency_limit=1,
@@ -235,6 +273,7 @@ def build_map_building_tab():
             start_button,
             finish_button,
             confirmed,
+            stop_existing_button,
         ],
         concurrency_id="guide-robot",
         concurrency_limit=1,
@@ -246,6 +285,23 @@ def build_map_building_tab():
         concurrency_id="guide-robot",
         concurrency_limit=1,
         trigger_mode="always_last",
+    )
+    stop_existing_button.click(
+        fn=stop_existing_mapping,
+        inputs=[session],
+        outputs=[
+            session,
+            map_image,
+            status_text,
+            current_pose,
+            power_status,
+            home_dock,
+            start_button,
+            finish_button,
+            stop_existing_button,
+        ],
+        concurrency_id="guide-robot",
+        concurrency_limit=1,
     )
     save_button.click(
         fn=save_map_to_output,
@@ -268,6 +324,7 @@ def build_map_building_tab():
         "status_text": status_text,
         "start_button": start_button,
         "finish_button": finish_button,
+        "stop_existing_button": stop_existing_button,
         "saved_map": saved_map,
     }
 

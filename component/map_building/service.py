@@ -54,7 +54,11 @@ class GuideMapBuilder:
         if output_path.exists() and not kwargs.get("overwrite", False):
             raise FileExistsError(f"Map already exists: {output_path}")
         if self.slam.mapping.is_enabled():
-            raise RuntimeError("Mapping is already active")
+            raise RuntimeError(
+                "Mapping is already active on the robot. This browser session "
+                "does not own that build; finish or stop the existing mapping "
+                "run before starting a new one."
+            )
 
         health = self.slam.system_status.require_healthy()
         current_action = self.slam.motion.get_current_action()
@@ -119,6 +123,23 @@ class GuideMapBuilder:
                 except Exception:
                     logger.exception("Failed to stop mapping after start error")
             raise
+
+    def stop_active_mapping(self, **kwargs: Any) -> None:
+        """Stop a mapping run whose browser session is no longer available.
+
+        This pauses mapping only; it does not clear or save the in-memory map.
+        A caller must deliberately invoke it before beginning a replacement map.
+        """
+        if not self.slam.mapping.is_enabled():
+            raise RuntimeError("Mapping is not active")
+
+        self.slam.mapping.stop(timeout=kwargs.get("timeout", 10))
+        self.slam.mapping.wait_enabled(
+            False,
+            timeout=kwargs.get("timeout", 10),
+            poll_interval=kwargs.get("poll_interval", 0.25),
+        )
+        logger.info("Stopped active mapping run without clearing its map")
 
     def finish(self, session: dict, **kwargs: Any) -> dict:
         if not session or not session.get("active"):
