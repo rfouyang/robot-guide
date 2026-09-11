@@ -17,7 +17,7 @@ else:
 
 
 TASK_EDITOR_STATE = GuideTaskDesignState(GUIDE.task_design)
-SEQUENCE_HEADERS = ["Order", "POI", "Arrival content"]
+SEQUENCE_HEADERS = ["Order", "POI", "Tianyi action", "Arrival content"]
 
 _empty_draft = TASK_EDITOR_STATE.empty_draft
 _task_choices = TASK_EDITOR_STATE.task_choices
@@ -121,6 +121,11 @@ def build_task_design_tab():
             choices=[],
             scale=2,
         )
+        action_selector = gr.Dropdown(
+            label="Body action before speech (optional)",
+            choices=[],
+            scale=2,
+        )
         stop_content = gr.Textbox(
             label="Content to speak on arrival",
             placeholder="What should the robot say at this POI?",
@@ -136,7 +141,7 @@ def build_task_design_tab():
 
     sequence_table = gr.Dataframe(
         headers=SEQUENCE_HEADERS,
-        datatype=["number", "str", "str"],
+        datatype=["number", "str", "str", "str"],
         type="array",
         label="Visit sequence",
         interactive=False,
@@ -163,6 +168,7 @@ def build_task_design_tab():
         sequence_table,
         selected_stop_index,
         poi_selector,
+        action_selector,
         stop_content,
         selection_text,
         editor_status,
@@ -178,6 +184,7 @@ def build_task_design_tab():
         sequence_table,
         selected_stop_index,
         poi_selector,
+        action_selector,
         stop_content,
         selection_text,
         editor_status,
@@ -221,7 +228,7 @@ def build_task_design_tab():
     )
     add_stop_button.click(
         fn=add_stop_ui,
-        inputs=[draft, poi_selector, stop_content],
+        inputs=[draft, poi_selector, action_selector, stop_content],
         outputs=draft_edit_outputs,
         concurrency_id="guide-task-design",
         concurrency_limit=1,
@@ -234,7 +241,13 @@ def build_task_design_tab():
     )
     update_stop_button.click(
         fn=update_stop_ui,
-        inputs=[draft, selected_stop_index, poi_selector, stop_content],
+        inputs=[
+            draft,
+            selected_stop_index,
+            poi_selector,
+            action_selector,
+            stop_content,
+        ],
         outputs=draft_edit_outputs,
         concurrency_id="guide-task-design",
         concurrency_limit=1,

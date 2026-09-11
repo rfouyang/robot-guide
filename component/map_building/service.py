@@ -9,17 +9,61 @@ from loguru import logger
 
 from util.slam_helper import SLAM
 
+from .map_identity import MapIdentityRegistry, StcmIdentity, inspect_stcm
+
 
 BASE_DIR = Path(__file__).resolve().parents[2]
+DEFAULT_ASSET_DIR = BASE_DIR / "asset"
 DEFAULT_OUTPUT_DIR = BASE_DIR / "output"
 
 
 class GuideMapBuilder:
     """Own the Guide workflow for building and saving a map."""
 
-    def __init__(self, slam: SLAM, output_dir: Path = DEFAULT_OUTPUT_DIR) -> None:
+    def __init__(
+        self,
+        slam: SLAM,
+        output_dir: Path = DEFAULT_OUTPUT_DIR,
+        asset_dir: Path = DEFAULT_ASSET_DIR,
+        registry_path: Path | None = None,
+    ) -> None:
         self.output_dir = Path(output_dir)
+        self.asset_dir = Path(asset_dir)
         self.slam = slam
+        self.registry = MapIdentityRegistry(
+            Path(registry_path) if registry_path else self.output_dir / "map_registry.json"
+        )
+
+    def list_asset_maps(self) -> list[dict]:
+        """List deployable maps; generated output maps are deliberately excluded."""
+        maps = []
+        for path in sorted(self.asset_dir.glob("*.stcm"), key=lambda item: item.name):
+            if path.is_file() and not path.is_symlink():
+                maps.append(
+                    {
+                        "name": path.name,
+                        "path": str(path),
+                        "source": f"asset/{path.name}",
+                        "size": path.stat().st_size,
+                    }
+                )
+        return maps
+
+    def resolve_asset_map(self, selection: str | Path) -> Path:
+        """Resolve a UI choice to a direct child of the authoritative asset folder."""
+        selected = Path(str(selection))
+        if selected.is_absolute() or selected.parent != Path("."):
+            raise ValueError("Select a map by name from the asset map catalog")
+        if selected.suffix.lower() != ".stcm":
+            raise ValueError("Map filename must use the .stcm extension")
+
+        candidates = {
+            Path(item["path"]).resolve(): item for item in self.list_asset_maps()
+        }
+        resolved = (self.asset_dir / selected.name).resolve()
+        if resolved not in candidates:
+            raise FileNotFoundError(f"Asset map does not exist: asset/{selected.name}")
+        return resolved
 
     def get_output_path(self, filename: str) -> Path:
         name = Path(filename).name
@@ -39,15 +83,214 @@ class GuideMapBuilder:
         }
 
     def save_map(self, filename: str, **kwargs: Any) -> Path:
+        output_path = self.get_output_path(filename)
         return self.slam.map_client.save_map(
-            filename=filename,
+            filename=output_path.name,
+            output_dir=self.output_dir,
             overwrite=kwargs.get("overwrite", False),
         )
 
-    def upload_map(self, map_path: Path, **kwargs: Any):
-        response = self.slam.map_client.upload_map(map_path)
-        self.slam.map_client.reload_map(**kwargs)
-        return response
+    def _map_operation_preflight(self) -> dict:
+        if self.slam.mapping.is_enabled():
+            raise RuntimeError("Stop map building before changing the active map")
+
+        map_status = self.slam.map_client.get_map_status()
+        if map_status.get("is_managed_by_cloud"):
+            raise RuntimeError(
+                "Local map changes are blocked while the robot map is managed by cloud"
+            )
+
+        health = self.slam.system_status.require_healthy()
+        current_action = self.slam.motion.get_current_action()
+        if (
+            current_action is not None
+            and current_action.get("state", {}).get("status") != 4
+        ):
+            raise RuntimeError(
+                f"Robot has an active action: {current_action.get('action_id')}"
+            )
+
+        power = self.slam.home_dock.require_on_dock()
+        self.slam.power.require_charging(status=power)
+        return {"map_status": map_status, "health": health, "power": power}
+
+    @staticmethod
+    def _inspect_path(path: Path) -> StcmIdentity:
+        return inspect_stcm(path.read_bytes())
+
+    def _asset_identities(self) -> list[tuple[dict, StcmIdentity]]:
+        candidates = []
+        for item in self.list_asset_maps():
+            try:
+                candidates.append((item, self._inspect_path(Path(item["path"]))))
+            except (OSError, ValueError) as exc:
+                logger.warning(f"Cannot inspect asset map {item['source']}: {exc}")
+        return candidates
+
+    def get_current_map_identity(self) -> dict:
+        """Identify the loaded robot map against asset maps without changing it."""
+        map_status = self.slam.map_client.get_map_status()
+        load_status = map_status.get("map_load_status", "UNKNOWN")
+        try:
+            floor = self.slam.map_client.get_robot_current_floor()
+        except Exception as exc:
+            logger.warning(f"Cannot read current map floor: {exc}")
+            floor = {}
+
+        map_id = floor.get("map_id") or map_status.get("current_map_id")
+        result = {
+            "display_name": "Unknown",
+            "source": None,
+            "match": "unknown",
+            "verified": False,
+            "map_id": map_id,
+            "load_status": load_status,
+            "building": floor.get("building"),
+            "floor": floor.get("floor"),
+            "mapping": self.slam.mapping.is_enabled(),
+            "managed_by_cloud": bool(map_status.get("is_managed_by_cloud")),
+            "map_status": map_status,
+            "matched_candidates": [],
+        }
+        try:
+            home_dock = self.slam.home_dock.get_current_home_dock()
+            dock_data = home_dock.get("data") or {}
+            result["home_dock_bound"] = bool(
+                home_dock.get("result") and dock_data.get("is_binded")
+            )
+        except Exception as exc:
+            logger.warning(f"Cannot read current home-dock binding: {exc}")
+            result["home_dock_bound"] = None
+
+        if load_status != "LOADED":
+            return result
+
+        try:
+            current = inspect_stcm(self.slam.map_client.get_composite_map())
+        except Exception as exc:
+            result["identity_error"] = str(exc)
+            registered = self.registry.get(map_id)
+            if registered:
+                result.update(
+                    display_name=registered.get("name", "Unknown"),
+                    source=registered.get("source"),
+                    match="registry",
+                )
+            return result
+
+        result.update(
+            sha256=current.sha256,
+            canonical_sha256=current.canonical_sha256,
+            dimensions={"width": current.width, "height": current.height},
+            origin={"x": current.origin_x, "y": current.origin_y},
+            resolution={"x": current.resolution_x, "y": current.resolution_y},
+        )
+        candidates = self._asset_identities()
+        exact = [item for item, identity in candidates if identity.sha256 == current.sha256]
+        matches = exact or [
+            item
+            for item, identity in candidates
+            if identity.canonical_sha256 == current.canonical_sha256
+        ]
+        result["matched_candidates"] = [item["source"] for item in matches]
+        if len(matches) == 1:
+            item = matches[0]
+            result.update(
+                display_name=item["name"],
+                source=item["source"],
+                match="exact" if exact else "normalized",
+                verified=True,
+            )
+        elif len(matches) > 1:
+            result.update(
+                display_name="Ambiguous asset match",
+                match="ambiguous",
+            )
+        else:
+            registered = self.registry.get(map_id)
+            if registered:
+                result.update(
+                    display_name=registered.get("name", "Unknown"),
+                    source=registered.get("source"),
+                    match="registry",
+                )
+        return result
+
+    def _register_verified_identity(self, identity: dict) -> None:
+        if not identity.get("verified") or not identity.get("map_id"):
+            return
+        self.registry.set(
+            identity["map_id"],
+            {
+                "name": identity["display_name"],
+                "source": identity["source"],
+                "canonical_sha256": identity["canonical_sha256"],
+                "updated_at": datetime.now(timezone.utc).isoformat(),
+            },
+        )
+
+    def switch_map(self, selection: str | Path, **kwargs: Any) -> dict:
+        """Persist and load one map selected strictly from the asset catalog."""
+        asset_path = self.resolve_asset_map(selection)
+        expected = self._inspect_path(asset_path)
+        self._map_operation_preflight()
+        self.slam.map_client.upload_map(asset_path)
+        try:
+            self.slam.map_client.reload_map(**kwargs)
+        except Exception as exc:
+            raise RuntimeError(
+                f"asset/{asset_path.name} was uploaded to robot storage, but "
+                "the robot did not reload it successfully"
+            ) from exc
+
+        try:
+            identity = self.get_current_map_identity()
+        except Exception as exc:
+            raise RuntimeError(
+                f"asset/{asset_path.name} was reloaded, but its active identity "
+                "could not be verified"
+            ) from exc
+        if identity.get("canonical_sha256") != expected.canonical_sha256:
+            raise RuntimeError(
+                "Robot reloaded a map, but its identity does not match "
+                f"asset/{asset_path.name}"
+            )
+        self._register_verified_identity(identity)
+        return identity
+
+    def upload_map(self, map_path: Path, **kwargs: Any) -> dict:
+        """Backward-compatible alias with the same asset-only restriction."""
+        return self.switch_map(str(map_path), **kwargs)
+
+    @staticmethod
+    def _floor_count(document: Any) -> int:
+        if isinstance(document, list):
+            return len(document)
+        if isinstance(document, dict):
+            for key in ("floors", "data", "maps"):
+                value = document.get(key)
+                if isinstance(value, list):
+                    return len(value)
+                if isinstance(value, dict):
+                    try:
+                        return GuideMapBuilder._floor_count(value)
+                    except ValueError:
+                        pass
+        raise ValueError("Robot returned an unrecognized floor-list response")
+
+    def sync_current_map(self, **kwargs: Any) -> dict:
+        """Persist and reload the robot's current map in single-floor mode."""
+        self._map_operation_preflight()
+        floor_count = self._floor_count(self.slam.map_client.get_floors())
+        if floor_count != 1:
+            raise RuntimeError(
+                f"Map sync is allowed only with exactly one floor; found {floor_count}"
+            )
+
+        self.slam.map_client.sync_map(**kwargs)
+        identity = self.get_current_map_identity()
+        self._register_verified_identity(identity)
+        return identity
 
     def preflight(self, filename: str = "office2.stcm", **kwargs: Any) -> dict:
         output_path = self.get_output_path(filename)
@@ -154,8 +397,8 @@ class GuideMapBuilder:
         if home_dock is None:
             raise RuntimeError("Registered home dock is missing from the completed map")
 
-        output_path = self.slam.map_client.save_map(
-            filename=session["filename"],
+        output_path = self.save_map(
+            session["filename"],
             overwrite=kwargs.get("overwrite", False),
         )
         result = {

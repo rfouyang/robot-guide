@@ -1,3 +1,4 @@
+import os
 import time
 from pathlib import Path
 
@@ -60,6 +61,14 @@ class MapClient:
         return current_floor
 
     @classmethod
+    def get_floors(cls):
+        url = f"{Base.BASE_URL}/api/multi-floor/map/v1/floors"
+
+        response = requests.get(url, timeout=5)
+        response.raise_for_status()
+        return response.json()
+
+    @classmethod
     def upload_map(cls, map_path):
         path = Path(map_path).expanduser()
         url = f"{Base.BASE_URL}/api/multi-floor/map/v1/stcm"
@@ -74,22 +83,18 @@ class MapClient:
         return response
 
     @classmethod
-    def save_map(cls, **kwargs):
-        """Download the current composite map into the output directory."""
+    def get_composite_map(cls, **kwargs):
+        """Return the current in-memory composite map without changing it."""
         url = f"{Base.BASE_URL}/api/core/slam/v1/maps/stcm"
-        filename = Path(kwargs.get("filename", "map.stcm")).name
-        output_path = OUTPUT_DIR / filename
         timeout = kwargs.get("timeout", 30)
         poll_interval = kwargs.get("poll_interval", 0.5)
 
-        if output_path.suffix.lower() != ".stcm":
-            raise ValueError("Map filename must use the .stcm extension")
-        if output_path.exists() and not kwargs.get("overwrite", False):
-            raise FileExistsError(f"Map already exists: {output_path}")
-
         deadline = time.monotonic() + timeout
         while True:
-            response = requests.get(url, timeout=30)
+            response = requests.get(
+                url,
+                timeout=kwargs.get("request_timeout", 30),
+            )
             if response.status_code != 403:
                 response.raise_for_status()
                 break
@@ -104,8 +109,24 @@ class MapClient:
             logger.info(f"Map export unavailable while status is {status}; retrying")
             time.sleep(poll_interval)
 
+        return response.content
+
+    @classmethod
+    def save_map(cls, **kwargs):
+        """Download the current composite map into the selected output directory."""
+        filename = Path(kwargs.get("filename", "map.stcm")).name
+        output_dir = Path(kwargs.get("output_dir", OUTPUT_DIR))
+        output_path = output_dir / filename
+
+        if output_path.suffix.lower() != ".stcm":
+            raise ValueError("Map filename must use the .stcm extension")
+        if output_path.exists() and not kwargs.get("overwrite", False):
+            raise FileExistsError(f"Map already exists: {output_path}")
+
         output_path.parent.mkdir(parents=True, exist_ok=True)
-        output_path.write_bytes(response.content)
+        temporary_path = output_path.with_suffix(output_path.suffix + ".tmp")
+        temporary_path.write_bytes(cls.get_composite_map(**kwargs))
+        os.replace(temporary_path, output_path)
         logger.info(f"Saved map: {output_path}")
 
         return output_path

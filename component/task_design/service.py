@@ -14,9 +14,15 @@ DEFAULT_CONFIG_PATH = BASE_DIR / "config" / "task.json"
 class TaskDesigner:
     """Task CRUD and resolution against the currently loaded POIs."""
 
-    def __init__(self, path: Path = DEFAULT_CONFIG_PATH, slam: SLAM | None = None) -> None:
+    def __init__(
+        self,
+        path: Path = DEFAULT_CONFIG_PATH,
+        slam: SLAM | None = None,
+        body_actions=None,
+    ) -> None:
         self.repository = GuideTaskRepository(path)
         self.slam = slam or SLAM()
+        self.body_actions = body_actions
 
     def list_tasks(self):
         return [task.to_dict() for task in self.repository.list()]
@@ -44,6 +50,14 @@ class TaskDesigner:
                     }
                 )
         return sorted(pois, key=lambda item: item["name"].casefold())
+
+    def available_actions(self):
+        if self.body_actions is None:
+            return []
+        return sorted(
+            self.body_actions.list_actions(),
+            key=lambda item: str(item.get("label") or item.get("action_id")).casefold(),
+        )
 
     def resolve_task(self, task):
         task = GuideTask.from_dict(task, require_stops=True).to_dict()

@@ -9,6 +9,7 @@ from util.slam_helper import SLAM
 
 if __package__:
     from ..common.docking import DockingService
+    from ..common.body_action import BodyActionClient
     from ..common.errors import GuideTaskCancelled
     from ..common.execution_checkpoint import GuideExecutionCheckpoint
     from ..common.execution_options import GuideExecutionOptions
@@ -18,6 +19,7 @@ if __package__:
     from .preflight import GuideExecutionPreflight
 else:
     from component.common.docking import DockingService
+    from component.common.body_action import BodyActionClient
     from component.common.errors import GuideTaskCancelled
     from component.common.execution_checkpoint import GuideExecutionCheckpoint
     from component.common.execution_options import GuideExecutionOptions
@@ -40,14 +42,17 @@ class GuideTaskExecutor:
         slam: SLAM | None = None,
         options: GuideExecutionOptions | None = None,
         audio_dir: Path = TASK_AUDIO_DIR,
+        body_actions: BodyActionClient | None = None,
     ) -> None:
         self.task_designer = task_designer
         self.slam = slam or SLAM()
         self.audio_dir = Path(audio_dir)
         self.options = options or GuideExecutionOptions()
+        self.body_actions = body_actions or BodyActionClient()
         self.preflight_service = GuideExecutionPreflight(
             self.task_designer,
             self.slam,
+            self.body_actions,
         )
         self.navigation = NavigationService(self.slam)
         self.speech = SpeechService(audio_dir=self.audio_dir)
@@ -76,6 +81,13 @@ class GuideTaskExecutor:
             logger.warning(f"Could not cancel the active robot action: {exc}")
         return False
 
+    def _cancel_active_body_action(self):
+        try:
+            return self.body_actions.cancel_current()
+        except Exception as exc:
+            logger.warning(f"Could not cancel the active Tianyi body action: {exc}")
+            return False
+
     @staticmethod
     def _event(status, message, task, **kwargs):
         return {
@@ -86,6 +98,7 @@ class GuideTaskExecutor:
             "stop_index": kwargs.get("stop_index"),
             "stop_count": len(task["stops"]),
             "poi_name": kwargs.get("poi_name"),
+            "action_id": kwargs.get("action_id"),
             "error": kwargs.get("error"),
         }
 
@@ -188,10 +201,20 @@ class GuideTaskExecutor:
             )
 
         power = self.slam.power.get_status()
-        if power.get("dockingStatus") == "on_dock":
-            self._check_cancelled()
-            self._perform_undock(**kwargs)
-        return True
+        return power.get("dockingStatus") != "on_dock"
+
+    def _is_off_dock(self, *, default):
+        """Read departure state after a motion attempt.
+
+        If the power endpoint is unavailable after navigation has started, use
+        the caller's conservative default so recovery can still run.
+        """
+        try:
+            power = self.slam.power.get_status()
+        except Exception as exc:
+            logger.warning(f"Could not verify departure state: {exc}")
+            return default
+        return power.get("dockingStatus") != "on_dock"
 
     def _find_poi(self, poi_id):
         expected_id = str(poi_id or "").strip()
@@ -264,7 +287,8 @@ class GuideTaskExecutor:
         self._stop_requested.set()
         self._cancel_event.set()
         action_stopped = self._cancel_active_action()
-        if was_running or action_stopped:
+        body_action_stopped = self._cancel_active_body_action()
+        if was_running or action_stopped or body_action_stopped:
             logger.warning("Guide robot stop requested")
             return True
         self._stop_requested.clear()
@@ -280,6 +304,7 @@ class GuideTaskExecutor:
             return False
         self._cancel_event.set()
         self._cancel_active_action()
+        self._cancel_active_body_action()
         logger.warning("Task cancellation requested")
         return True
 
@@ -299,6 +324,8 @@ class GuideTaskExecutor:
         self._active_mode = "task"
         options = self.options.with_overrides(**kwargs)
         departed = False
+        body_arm_token = None
+        body_prepared = False
         task = None
         start_stop_index = 0
         try:
@@ -327,6 +354,22 @@ class GuideTaskExecutor:
                 else self.preflight(task, **kwargs)
             )
             task = preflight["task"]
+            action_ids = sorted(
+                {
+                    stop["action"]["action_id"]
+                    for stop in task["stops"]
+                    if stop.get("action") is not None
+                }
+            )
+            if action_ids:
+                if kwargs.get("body_actions_confirmed") is not True:
+                    raise PermissionError(
+                        "Confirm physical Tianyi body actions before running this task"
+                    )
+                body_arm_token = self.body_actions.arm(
+                    action_ids,
+                    confirmed=True,
+                )
             if start_stop_index >= len(task["stops"]):
                 raise RuntimeError("The selected task has no remaining POIs")
             if not resume:
@@ -369,10 +412,16 @@ class GuideTaskExecutor:
                 self._check_cancelled()
 
             if not resume:
-                yield self._event("departing", "Leaving the charging dock", task)
+                first_stop = task["stops"][start_stop_index]
+                yield self._event(
+                    "departing",
+                    (
+                        "Leaving the charging dock through planned navigation "
+                        f"to {first_stop['poi_name']}"
+                    ),
+                    task,
+                )
                 self._check_cancelled()
-                departed = True
-                self._perform_undock(**kwargs)
             self._check_cancelled()
 
             for stop_index, (stop, audio_path) in enumerate(
@@ -387,15 +436,65 @@ class GuideTaskExecutor:
                     poi_name=stop["poi_name"],
                 )
                 self._check_cancelled()
-                self.navigation.navigate(
-                    stop,
-                    move_timeout=options.move_timeout,
-                    poll_interval=options.poll_interval,
-                    acceptable_precision=options.acceptable_precision,
-                    fail_retry_count=options.fail_retry_count,
-                    speed_ratio=options.speed_ratio,
-                )
+                try:
+                    self.navigation.navigate(
+                        stop,
+                        move_timeout=options.move_timeout,
+                        poll_interval=options.poll_interval,
+                        acceptable_precision=options.acceptable_precision,
+                        fail_retry_count=options.fail_retry_count,
+                        speed_ratio=options.speed_ratio,
+                    )
+                except Exception:
+                    if not departed:
+                        departed = self._is_off_dock(default=True)
+                    raise
+
+                if not departed:
+                    departed = self._is_off_dock(default=True)
+                    if not departed:
+                        raise RuntimeError(
+                            "Navigation completed but the robot did not leave "
+                            "the charging dock"
+                        )
                 self._check_cancelled()
+
+                body_action = stop.get("action")
+                if body_action is not None:
+                    if body_arm_token is None:
+                        raise RuntimeError("Tianyi body-action authorization is missing")
+                    if not body_prepared:
+                        yield self._event(
+                            "body_preparing",
+                            "Moving the Tianyi body to concierge init pose",
+                            task,
+                            stop_index=stop_index,
+                            poi_name=stop["poi_name"],
+                            action_id=body_action["action_id"],
+                        )
+                        self.body_actions.prepare(body_arm_token)
+                        body_prepared = True
+                        self._check_cancelled()
+                    yield self._event(
+                        "body_action",
+                        f"Performing {body_action['action_id']}",
+                        task,
+                        stop_index=stop_index,
+                        poi_name=stop["poi_name"],
+                        action_id=body_action["action_id"],
+                    )
+                    try:
+                        self.body_actions.execute(
+                            body_action["action_id"],
+                            body_arm_token,
+                            self._cancel_event,
+                        )
+                    except Exception:
+                        # The arms may not have returned to concierge_init. Keep the
+                        # base stationary until an operator verifies the body state.
+                        self._stop_requested.set()
+                        raise
+                    self._check_cancelled()
 
                 yield self._event(
                     "speaking",
@@ -427,6 +526,7 @@ class GuideTaskExecutor:
                 exc = GuideTaskCancelled("Task was cancelled by the user")
             stopped = self._stop_requested.is_set()
             self._cancel_active_action()
+            self._cancel_active_body_action()
             recovery_error = None
             if departed and task is not None and not stopped:
                 yield self._event(
@@ -457,8 +557,10 @@ class GuideTaskExecutor:
                 message = f"Task failed: {exc}"
                 if recovery_error:
                     message += f"; return-to-dock also failed: {recovery_error}"
-                elif departed:
+                elif departed and not stopped:
                     message += "; robot returned to the dock"
+                elif stopped:
+                    message += "; robot remains at its current location"
                 yield self._event(
                     "failed", message, task, error=str(recovery_error or exc)
                 )

@@ -3,3 +3,6 @@ BYTEPLUS_API_KEY=your_byteplus_api_key
 
 # Slamware REST API. Change this if the robot is not at the default address.
 SLAM_BASE_URL=http://192.168.11.1:1448
+
+# Local Tianyi body-action API started by launch_robot_action_service.sh.
+ROBOT_ACTION_BASE_URL=http://127.0.0.1:8765

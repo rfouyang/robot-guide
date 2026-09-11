@@ -8,7 +8,10 @@ if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
 if __package__:
-    from .tabs.map_building_tab import build_map_building_tab
+    from .tabs.map_building_tab import (
+        build_map_building_tab,
+        refresh_current_map_ui,
+    )
     from .tabs.poi_management_tab import (
         build_poi_management_tab,
         refresh_map_view,
@@ -22,7 +25,10 @@ if __package__:
         initialize_task_execution,
     )
 else:
-    from app.ui_guide.tabs.map_building_tab import build_map_building_tab
+    from app.ui_guide.tabs.map_building_tab import (
+        build_map_building_tab,
+        refresh_current_map_ui,
+    )
     from app.ui_guide.tabs.poi_management_tab import (
         build_poi_management_tab,
         refresh_map_view,
@@ -42,7 +48,7 @@ def create_ui():
         gr.Markdown("# Robot Guide")
         with gr.Tabs():
             with gr.Tab("Map Building"):
-                build_map_building_tab()
+                map_components = build_map_building_tab()
             with gr.Tab("POI Management"):
                 poi_components = build_poi_management_tab()
             with gr.Tab("Task Design"):
@@ -50,6 +56,12 @@ def create_ui():
             with gr.Tab("Task Execution"):
                 execution_components = build_task_execution_tab()
 
+        ui.load(
+            fn=refresh_current_map_ui,
+            outputs=map_components["identity_outputs"],
+            concurrency_id="guide-robot",
+            concurrency_limit=1,
+        )
         ui.load(
             fn=refresh_map_view,
             outputs=poi_components["refresh_outputs"],

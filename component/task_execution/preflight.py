@@ -6,9 +6,37 @@ from util.slam_helper import SLAM
 class GuideExecutionPreflight:
     """Validate that the Guide execution environment is ready."""
 
-    def __init__(self, task_designer, slam: SLAM) -> None:
+    def __init__(self, task_designer, slam: SLAM, body_actions=None) -> None:
         self.task_designer = task_designer
         self.slam = slam
+        self.body_actions = body_actions
+
+    def _resolve_and_check_actions(self, task):
+        resolved = self.task_designer.resolve_task(task)
+        action_ids = {
+            stop["action"]["action_id"]
+            for stop in resolved["stops"]
+            if stop.get("action") is not None
+        }
+        if not action_ids:
+            return resolved
+        if self.body_actions is None:
+            raise RuntimeError("Robot Action service is not configured")
+        available = {
+            action["action_id"] for action in self.body_actions.list_actions()
+        }
+        missing = sorted(action_ids - available)
+        if missing:
+            raise RuntimeError(
+                "Guide body actions are unavailable: " + ", ".join(missing)
+            )
+        health = self.body_actions.health()
+        if health.get("ready") is not True:
+            raise RuntimeError(
+                "Tianyi body-action preflight failed: "
+                + str(health.get("error") or "unknown error")
+            )
+        return resolved
 
     def _check_environment(self, **kwargs):
         map_status = self.slam.map_client.get_map_status()
@@ -42,7 +70,7 @@ class GuideExecutionPreflight:
         self.slam.power.require_charging(status=power)
         home_dock = self.slam.home_dock.require_bound_home_dock()
         return {
-            "task": self.task_designer.resolve_task(task),
+            "task": self._resolve_and_check_actions(task),
             "map": map_status,
             "localization_quality": quality,
             "power": power,
@@ -53,7 +81,7 @@ class GuideExecutionPreflight:
         """Validate a resume without requiring the robot to be on the dock."""
         map_status, quality, _ = self._check_environment(**kwargs)
         return {
-            "task": self.task_designer.resolve_task(task),
+            "task": self._resolve_and_check_actions(task),
             "map": map_status,
             "localization_quality": quality,
         }

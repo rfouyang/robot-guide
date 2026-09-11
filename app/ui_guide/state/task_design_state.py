@@ -31,9 +31,28 @@ class GuideTaskDesignState:
         ]
 
     @staticmethod
+    def action_choices(actions):
+        return [
+            (
+                str(action.get("label") or action["action_id"]),
+                action["action_id"],
+            )
+            for action in actions
+        ]
+
+    @staticmethod
     def sequence_rows(draft):
         return [
-            [index, stop["poi_name"], stop["content"]]
+            [
+                index,
+                stop["poi_name"],
+                (
+                    stop.get("action", {}).get("action_id", "")
+                    if stop.get("action")
+                    else ""
+                ),
+                stop["content"],
+            ]
             for index, stop in enumerate(draft.get("stops", []), start=1)
         ]
 
@@ -60,6 +79,7 @@ class GuideTaskDesignState:
             self.sequence_rows(draft),
             None,
             gr.update(value=None),
+            gr.update(value=None),
             "",
             "Select a stop to edit or reorder it.",
             message,
@@ -85,9 +105,26 @@ class GuideTaskDesignState:
             pois = []
             poi_error = exc
 
+        action_error = None
+        try:
+            actions = self.task_designer.available_actions()
+        except Exception as exc:
+            logger.warning(f"Could not load Tianyi actions for task editor: {exc}")
+            actions = []
+            action_error = exc
+
         if message is None:
-            if poi_error:
+            if poi_error and action_error:
+                message = (
+                    f"Tasks loaded, but POIs and Tianyi actions are unavailable: "
+                    f"{poi_error}; {action_error}"
+                )
+            elif poi_error:
                 message = f"Tasks loaded, but POIs are unavailable: {poi_error}"
+            elif action_error:
+                message = (
+                    f"Tasks loaded, but Tianyi actions are unavailable: {action_error}"
+                )
             elif selected_task:
                 message = f"Loaded task: {selected_task['name']}"
             else:
@@ -95,6 +132,7 @@ class GuideTaskDesignState:
 
         editor = list(self.editor_state(selected_task, message))
         editor[4] = gr.update(choices=self.poi_choices(pois), value=None)
+        editor[5] = gr.update(choices=self.action_choices(actions), value=None)
         return (
             gr.update(
                 choices=self.task_choices(tasks),
@@ -137,6 +175,13 @@ class GuideTaskDesignState:
             self.sequence_rows(draft),
             selected_index if selected else None,
             gr.update(value=selected["poi_id"] if selected else None),
+            gr.update(
+                value=(
+                    selected.get("action", {}).get("action_id")
+                    if selected and selected.get("action")
+                    else None
+                )
+            ),
             selected["content"] if selected else "",
             (
                 f"Selected stop {selected_index + 1}: **{selected['poi_name']}**"
@@ -150,15 +195,20 @@ class GuideTaskDesignState:
             update,
         )
 
-    def add_stop(self, draft, poi_id, content):
+    def add_stop(self, draft, poi_id, action_id, content):
         content = str(content or "").strip()
         if not content:
             raise gr.Error("Enter the content the robot should speak at this POI")
         poi = self.resolve_poi(poi_id)
         draft = copy.deepcopy(draft or self.empty_draft())
-        draft.setdefault("stops", []).append(
-            {"poi_id": poi["id"], "poi_name": poi["name"], "content": content}
-        )
+        stop = {"poi_id": poi["id"], "poi_name": poi["name"], "content": content}
+        if action_id:
+            stop["action"] = {
+                "action_id": str(action_id),
+                "phase": "before_speech",
+                "required": True,
+            }
+        draft.setdefault("stops", []).append(stop)
         return (
             *self.draft_edit_state(
                 draft,
@@ -183,7 +233,7 @@ class GuideTaskDesignState:
             message=f"Selected stop {selected_index + 1}.",
         )[2:]
 
-    def update_stop(self, draft, selected_index, poi_id, content):
+    def update_stop(self, draft, selected_index, poi_id, action_id, content):
         if selected_index is None:
             raise gr.Error("Select a stop in the sequence first")
         content = str(content or "").strip()
@@ -193,11 +243,18 @@ class GuideTaskDesignState:
         draft = copy.deepcopy(draft or self.empty_draft())
         if not 0 <= selected_index < len(draft.get("stops", [])):
             raise gr.Error("The selected stop is no longer available")
-        draft["stops"][selected_index] = {
+        stop = {
             "poi_id": poi["id"],
             "poi_name": poi["name"],
             "content": content,
         }
+        if action_id:
+            stop["action"] = {
+                "action_id": str(action_id),
+                "phase": "before_speech",
+                "required": True,
+            }
+        draft["stops"][selected_index] = stop
         return (
             *self.draft_edit_state(
                 draft,

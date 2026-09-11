@@ -27,6 +27,8 @@ def _apply_progress_event(stop_states, event):
         labels = {
             "preparing": "Preparing speech",
             "navigating": "Navigating",
+            "body_preparing": "Preparing body pose",
+            "body_action": "Performing body action",
             "speaking": "Speaking",
             "stop_completed": "Completed",
         }
@@ -46,7 +48,7 @@ def initialize_task_execution():
     return gr.update(choices=_task_choices(GUIDE.task_design.list_tasks()))
 
 
-def _execute_task_ui(task_id, resume=False):
+def _execute_task_ui(task_id, body_actions_confirmed=False, resume=False):
     if not task_id:
         yield (
             "**Cannot run:** Select and save a task first.",
@@ -82,9 +84,15 @@ def _execute_task_ui(task_id, resume=False):
     terminal_statuses = {"completed", "cancelled", "failed"}
     try:
         events = (
-            GUIDE.task_execution.resume_events(task_id)
+            GUIDE.task_execution.resume_events(
+                task_id,
+                body_actions_confirmed=body_actions_confirmed,
+            )
             if resume
-            else GUIDE.task_execution.run_events(task_id)
+            else GUIDE.task_execution.run_events(
+                task_id,
+                body_actions_confirmed=body_actions_confirmed,
+            )
         )
         for event in events:
             _apply_progress_event(stop_states, event)
@@ -121,12 +129,16 @@ def _execute_task_ui(task_id, resume=False):
         )
 
 
-def run_task_ui(task_id):
-    yield from _execute_task_ui(task_id)
+def run_task_ui(task_id, body_actions_confirmed=False):
+    yield from _execute_task_ui(task_id, body_actions_confirmed)
 
 
-def resume_task_ui(task_id):
-    yield from _execute_task_ui(task_id, resume=True)
+def resume_task_ui(task_id, body_actions_confirmed=False):
+    yield from _execute_task_ui(
+        task_id,
+        body_actions_confirmed,
+        resume=True,
+    )
 
 
 def cancel_task_ui():
@@ -188,6 +200,13 @@ def stop_robot_ui():
 def build_task_execution_tab():
     task_selector = gr.Dropdown(label="Saved guide task", choices=[])
     refresh_button = gr.Button("Refresh Tasks")
+    body_actions_confirmed = gr.Checkbox(
+        label=(
+            "Enable the saved Tianyi body actions for this run; the area is clear "
+            "and the emergency stop is ready"
+        ),
+        value=False,
+    )
     with gr.Row():
         run_button = gr.Button("Run Selected Task", variant="primary")
         cancel_button = gr.Button(
@@ -275,14 +294,14 @@ def build_task_execution_tab():
     )
     run_button.click(
         fn=run_task_ui,
-        inputs=[task_selector],
+        inputs=[task_selector, body_actions_confirmed],
         outputs=run_outputs,
         concurrency_id="guide-robot",
         concurrency_limit=1,
     )
     resume_button.click(
         fn=resume_task_ui,
-        inputs=[task_selector],
+        inputs=[task_selector, body_actions_confirmed],
         outputs=run_outputs,
         concurrency_id="guide-robot",
         concurrency_limit=1,
