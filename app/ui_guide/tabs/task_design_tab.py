@@ -17,7 +17,8 @@ else:
 
 
 TASK_EDITOR_STATE = GuideTaskDesignState(GUIDE.task_design)
-SEQUENCE_HEADERS = ["Order", "POI", "Tianyi action", "Arrival content"]
+SEQUENCE_HEADERS = ["Order", "POI", "Tianyi action sequence", "Arrival content"]
+ACTION_HEADERS = ["Order", "Tianyi action"]
 
 _empty_draft = TASK_EDITOR_STATE.empty_draft
 _task_choices = TASK_EDITOR_STATE.task_choices
@@ -30,6 +31,15 @@ _draft_edit_state = TASK_EDITOR_STATE.draft_edit_state
 add_stop_ui = TASK_EDITOR_STATE.add_stop
 select_stop_ui = TASK_EDITOR_STATE.select_stop
 update_stop_ui = TASK_EDITOR_STATE.update_stop
+add_action_ui = TASK_EDITOR_STATE.add_action
+select_action_ui = TASK_EDITOR_STATE.select_action
+move_action_up_ui = lambda actions, selected_index: TASK_EDITOR_STATE.move_action(
+    actions, selected_index, -1
+)
+move_action_down_ui = lambda actions, selected_index: TASK_EDITOR_STATE.move_action(
+    actions, selected_index, 1
+)
+remove_action_ui = TASK_EDITOR_STATE.remove_action
 move_stop_ui = TASK_EDITOR_STATE.move_stop
 move_stop_up_ui = lambda draft, selected_index: TASK_EDITOR_STATE.move_stop(
     draft, selected_index, -1
@@ -93,10 +103,12 @@ def mark_task_unsaved():
 def build_task_design_tab():
     draft = gr.State(_empty_draft())
     selected_stop_index = gr.State(None)
+    pending_actions = gr.State([])
+    selected_action_index = gr.State(None)
 
     gr.Markdown(
         "Design an ordered Guide route by selecting POIs and configuring "
-        "what should be spoken at each stop."
+        "what should be spoken and the ordered actions played at each stop."
     )
 
     with gr.Row():
@@ -122,7 +134,7 @@ def build_task_design_tab():
             scale=2,
         )
         action_selector = gr.Dropdown(
-            label="Body action before speech (optional)",
+            label="Tianyi arm action to append",
             choices=[],
             scale=2,
         )
@@ -132,12 +144,36 @@ def build_task_design_tab():
             lines=3,
             scale=4,
         )
-        with gr.Column(scale=1):
-            add_stop_button = gr.Button("Add Stop", variant="primary")
-            update_stop_button = gr.Button(
-                "Update Selected",
-                interactive=False,
-            )
+        add_action_button = gr.Button("Add Action", scale=1)
+
+    action_sequence_table = gr.Dataframe(
+        headers=ACTION_HEADERS,
+        datatype=["number", "str"],
+        type="array",
+        label=(
+            "Optional ordered actions played while this POI speaks "
+            "(empty keeps concierge_init)"
+        ),
+        interactive=False,
+        show_row_numbers=False,
+        max_height=240,
+    )
+    action_selection_text = gr.Markdown(
+        "Add actions in playback order, then select a row to reorder it."
+    )
+    with gr.Row():
+        move_action_up_button = gr.Button("Move Action Up", interactive=False)
+        move_action_down_button = gr.Button("Move Action Down", interactive=False)
+        remove_action_button = gr.Button(
+            "Remove Action",
+            variant="stop",
+            interactive=False,
+        )
+        add_stop_button = gr.Button("Add Stop", variant="primary")
+        update_stop_button = gr.Button(
+            "Update Selected Stop",
+            interactive=False,
+        )
 
     sequence_table = gr.Dataframe(
         headers=SEQUENCE_HEADERS,
@@ -169,6 +205,13 @@ def build_task_design_tab():
         selected_stop_index,
         poi_selector,
         action_selector,
+        pending_actions,
+        action_sequence_table,
+        selected_action_index,
+        action_selection_text,
+        move_action_up_button,
+        move_action_down_button,
+        remove_action_button,
         stop_content,
         selection_text,
         editor_status,
@@ -185,6 +228,13 @@ def build_task_design_tab():
         selected_stop_index,
         poi_selector,
         action_selector,
+        pending_actions,
+        action_sequence_table,
+        selected_action_index,
+        action_selection_text,
+        move_action_up_button,
+        move_action_down_button,
+        remove_action_button,
         stop_content,
         selection_text,
         editor_status,
@@ -194,6 +244,15 @@ def build_task_design_tab():
         update_stop_button,
     ]
     selection_outputs = draft_edit_outputs[2:]
+    action_editor_outputs = [
+        pending_actions,
+        action_sequence_table,
+        selected_action_index,
+        action_selection_text,
+        move_action_up_button,
+        move_action_down_button,
+        remove_action_button,
+    ]
     task_selector.change(
         fn=load_task_ui,
         inputs=[task_selector],
@@ -228,7 +287,7 @@ def build_task_design_tab():
     )
     add_stop_button.click(
         fn=add_stop_ui,
-        inputs=[draft, poi_selector, action_selector, stop_content],
+        inputs=[draft, poi_selector, pending_actions, stop_content],
         outputs=draft_edit_outputs,
         concurrency_id="guide-task-design",
         concurrency_limit=1,
@@ -245,7 +304,7 @@ def build_task_design_tab():
             draft,
             selected_stop_index,
             poi_selector,
-            action_selector,
+            pending_actions,
             stop_content,
         ],
         outputs=draft_edit_outputs,
@@ -270,6 +329,40 @@ def build_task_design_tab():
         fn=remove_stop_ui,
         inputs=[draft, selected_stop_index],
         outputs=draft_edit_outputs,
+        concurrency_id="guide-task-design",
+        concurrency_limit=1,
+    )
+    add_action_button.click(
+        fn=add_action_ui,
+        inputs=[pending_actions, action_selector],
+        outputs=[action_selector, *action_editor_outputs],
+        concurrency_id="guide-task-design",
+        concurrency_limit=1,
+    )
+    action_sequence_table.select(
+        fn=select_action_ui,
+        inputs=[pending_actions],
+        outputs=action_editor_outputs[2:],
+        queue=False,
+    )
+    move_action_up_button.click(
+        fn=move_action_up_ui,
+        inputs=[pending_actions, selected_action_index],
+        outputs=action_editor_outputs,
+        concurrency_id="guide-task-design",
+        concurrency_limit=1,
+    )
+    move_action_down_button.click(
+        fn=move_action_down_ui,
+        inputs=[pending_actions, selected_action_index],
+        outputs=action_editor_outputs,
+        concurrency_id="guide-task-design",
+        concurrency_limit=1,
+    )
+    remove_action_button.click(
+        fn=remove_action_ui,
+        inputs=[pending_actions, selected_action_index],
+        outputs=action_editor_outputs,
         concurrency_id="guide-task-design",
         concurrency_limit=1,
     )

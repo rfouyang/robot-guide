@@ -1,6 +1,51 @@
 # Current State Handoff
 
-Updated: 2026-09-11 19:06 CST
+Updated: 2026-09-14 17:41 CST
+
+## 2026-09-14 Tianyi Guide Integration
+
+Robot Guide now controls the Tianyi two-arm subset directly through ROS 2
+`/arm/status` and `/arm/cmd_pos`; it does not use `tianyi_hw_bridge` or an HTTP
+action service. The repository is self-contained with the pinned Tianyi URDF,
+model metadata, recorder-format action/pose JSON, and trajectory NPZ files under
+`asset/tianyi2/` and `data/`.
+
+Guide tasks may start from the mobile base's current position. Before the first
+navigation, motors 11-17 and 21-27 move from their measured positions to
+`concierge_init`; no other Tianyi motors are commanded. Each POI has one TTS
+content field and an optional ordered action list. The action sequence executes
+one action at a time while prepared TTS audio plays concurrently. A POI is
+complete only after both speech and the full action sequence finish. With an
+empty action list, the arms remain at `concierge_init` during speech.
+
+Task Design supports adding repeated actions and moving or removing entries in
+each POI's action sequence. Single-action task records remain readable and are
+normalized to the ordered-list schema. Save-time and execution preflight reject
+unknown actions but accept an empty list.
+
+The validated local action catalog is:
+
+- `concierge_present_left` and `concierge_present_right` (5 seconds each);
+- `concierge_wave_left` and `concierge_wave_right` (5 seconds each);
+- `concierge_speak_1`, `concierge_speak_2`, and `concierge_speak_3`
+  (17 seconds each).
+
+All seven actions pass schema, model, URDF hash, pose-reference, trajectory
+timing, joint-limit, keyframe, and configured arm-speed validation. Every
+composed pose matches its NPZ keyframe exactly. Live ROS preflight reports all
+14 arm motors ready and all seven actions available.
+
+Two full four-stop hardware guide runs were completed during development. The
+second validated concurrent action and speech at every POI, waited for both
+before continuing, and returned to the home dock successfully. The operator
+subsequently configured multiple and empty action sequences through the UI and
+confirmed the behavior works. The latest UI-driven guide run completed mobile
+base actions 17-21 and returned to the dock at 17:17 CST with battery 100% and
+charging enabled.
+
+Automated verification currently passes 77 unit tests, compilation, JSON
+validation, Gradio UI construction, and `git diff --check`. The Robot Guide UI
+is running in tmux session `robot_guide_ui_8085` on `0.0.0.0:8085` (PID 123641).
 
 ## Current Robot State
 
@@ -75,8 +120,9 @@ Result: 15 tests passed, compilation passed, and `git diff --check` passed.
 
 Start a new guide only when the normal preflight conditions are met: map loaded,
 mapping off, system healthy, no active action, localization quality at least 50,
-bound home dock, and robot on-dock and charging. The guide now leaves through
-its first POI navigation; do not run a separate undock first.
+and a bound home dock. The base may start from its current position. The Tianyi
+arms move to `concierge_init` before the first POI navigation; do not run a
+separate undock first.
 
 Useful read-only state checks:
 
@@ -92,94 +138,29 @@ curl --connect-timeout 2 --max-time 5 http://192.168.11.1:1448/api/core/motion/v
 
 ### Tianyi concierge action integration
 
-Architecture decision for the next session: `robot-guide` and `robot-action`
-must remain independent repositories. Robot Guide must own all logic and data
-needed to play Tianyi poses and actions. Its runtime must not import Python code
-from `robot-action`, read files from that checkout, call a Robot Action HTTP
-service, or require the Robot Action launcher to be running. The
-`robot-action` repository is reference material and an independent action
-recording/simulation tool only.
+Robot Guide now owns a self-contained copy of the recorder-format Tianyi model,
+poses, action definitions, and NPZ trajectories. It does not use
+`tianyi_hw_bridge`, an HTTP action service, or files from another checkout at
+runtime. It subscribes directly to `/arm/status` and publishes directly to
+`/arm/cmd_pos`, limited to motors 11-17 and 21-27.
 
-The Robot Guide implementation should therefore contain its own:
+The direct runtime validates the pinned URDF hash, action/pose/trajectory schema,
+17-joint recorder order, timing, joint limits, all 14 live arm statuses, motor
+errors, temperature, and vendor command subscriber availability. Only the two
+arms are extracted for hardware commands.
 
-- Tianyi ROS 2 action client, controller-result waiting, cancellation, and
-  hardware/diagnostic preflight logic;
-- local `concierge_init` and `concierge_xxx` pose/action definitions or
-  validated generated artifacts under Robot Guide configuration/assets;
-- action catalog and task-stop action selection data;
-- sequence execution using
-  `concierge_init -> concierge_xxx -> concierge_init`, after navigation and
-  before speech.
+Every Guide POI requires speech content and may have an ordered action list. A
+task moves to `concierge_init` before navigation, then uses
+`navigate -> (ordered action sequence + speech)` at each POI. Actions execute
+one by one while speech plays concurrently, and the POI completes only after
+both finish. With an empty action list, the arms stay at `concierge_init` while
+speech plays. Every configured action must start and finish at `concierge_init`.
+Initialization failure prevents departure, while action failure keeps the base
+at the POI.
 
-Suggested ownership is a Robot Guide workflow module such as
-`component/body_action/`, configuration in
-`config/concierge_action_config.py`, and pose/action files under
-`asset/pose/` or `asset/action/`. The exact internal format can be selected
-during implementation, but it must be versioned and usable entirely within
-this repository.
-
-Today's local HTTP integration is experimental work and is not the final
-architecture. In the next session, rework or remove the Robot Guide
-`component/common/body_action.py` HTTP client, `ROBOT_ACTION_BASE_URL`
-configuration/documentation, the Robot Action localhost API dependency, and
-the dual-service launch instructions. Keep and port the useful behavior:
-task-design action selection, explicit run confirmation, result-aware
-execution, cancellation, fresh health checks, and deterministic pose-sequence
-building.
-
-### Tianyi hardware bridge launcher
-
-Launch the Tianyi 2.0 hardware bridge manually with the maintained script:
-
-```bash
-# Start and attach to the reusable tmux session.
-/home/nvidia/workspace/launch/launch_tianyi_hw_bridge.sh
-
-# Or start it in the background.
-/home/nvidia/workspace/launch/launch_tianyi_hw_bridge.sh --detached
-```
-
-The script sources ROS 2 Humble and
-`/home/nvidia/workspace/app/tianyi_ws/install/setup.bash`, then runs:
-
-```bash
-ros2 launch tianyi_hw_bridge hardware.launch.py \
-  robot_variant:=tianyi_inspire_hand
-```
-
-It uses the tmux session `tianyi_hardware`. Inspect or manage it with:
-
-```bash
-tmux list-sessions
-tmux attach-session -t tianyi_hardware
-tmux capture-pane -pt tianyi_hardware:0
-tmux kill-session -t tianyi_hardware
-```
-
-A systemd unit template exists at
-`/home/nvidia/workspace/launch/tianyi-hw-bridge.service`, but the bridge should
-continue to be launched manually unless an operator explicitly installs and
-enables that unit. Starting the bridge controls real Tianyi hardware; confirm
-the robot and surrounding area are safe before launch.
-
-Current runtime blocker: the host is still missing
-`ros-humble-joint-state-broadcaster` and
-`ros-humble-joint-trajectory-controller`. An installation attempt was blocked
-by interactive sudo authentication. Until an operator installs those packages,
-the Tianyi bridge hardware plugin starts but its six configured controllers do
-not load, so no body action can execute.
-
-No physical Tianyi pose or trajectory was commanded during this implementation.
-
-Robot Guide automated verification currently passes 25 tests, compilation, and
-`git diff --check`. Robot Action compilation passed. Its ROS-aware `.venv`
-dependency sync was stopped at the user's request and remains incomplete; the
-download cache was retained under `/tmp/robot-action-uv-cache` for a future
-session. No dependency process remains running.
-
-Implementation work stopped here for the day. No further application-code
-changes were made after the independent-repository decision, and no physical
-robot action was sent.
+The real robot successfully completed full guide tasks using the direct arm
+runtime and returned to the home dock; post-run arm preflight reported all 14
+motors ready with no error.
 
 ### Existing map and guide work
 

@@ -31,7 +31,42 @@ class TaskDesigner:
         return self.repository.get(task_id).to_dict()
 
     def save_task(self, name, stops, task_id=None):
+        self._validate_stop_actions(stops)
         return self.repository.save(name, stops, task_id).to_dict()
+
+    def _validate_stop_actions(self, stops) -> None:
+        if not isinstance(stops, list):
+            return
+
+        def actions_for(stop):
+            if not isinstance(stop, dict):
+                return []
+            actions = stop.get("actions")
+            if actions is None:
+                legacy_action = stop.get("action")
+                return [] if legacy_action is None else [legacy_action]
+            return actions if isinstance(actions, list) else []
+
+        action_ids = {
+            str(action.get("action_id") or "").strip()
+            for stop in stops
+            for action in actions_for(stop)
+            if isinstance(action, dict)
+        }
+        if "" in action_ids:
+            raise ValueError("Tianyi arm action IDs cannot be empty")
+        if self.body_actions is None:
+            return
+        available = {
+            str(action["action_id"])
+            for action in self.body_actions.list_actions()
+            if action.get("ready", True) is True
+        }
+        unavailable = sorted(action_ids - available)
+        if unavailable:
+            raise ValueError(
+                "Unavailable Tianyi arm actions: " + ", ".join(unavailable)
+            )
 
     def delete_task(self, task_id):
         self.repository.delete(task_id)

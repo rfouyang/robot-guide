@@ -28,8 +28,7 @@ def _apply_progress_event(stop_states, event):
             "preparing": "Preparing speech",
             "navigating": "Navigating",
             "body_preparing": "Preparing body pose",
-            "body_action": "Performing body action",
-            "speaking": "Speaking",
+            "performing_stop": "Action + speech",
             "stop_completed": "Completed",
         }
         if status in labels:
@@ -202,8 +201,8 @@ def build_task_execution_tab():
     refresh_button = gr.Button("Refresh Tasks")
     body_actions_confirmed = gr.Checkbox(
         label=(
-            "Enable the saved Tianyi body actions for this run; the area is clear "
-            "and the emergency stop is ready"
+            "Confirm Tianyi arm motion for this run; both arm areas are clear and "
+            "the emergency stop is ready"
         ),
         value=False,
     )

@@ -12,7 +12,8 @@ Humanoid Guide application for map building, POI management, task design, and ta
 - `component/task_execution/` — Task running, stopping, and resuming.
 - `util/slam_helper/` — SLAM API and robot movement functions.
 - `config/` — Saved task configuration.
-- `asset/` — Authoritative STCM maps that operators may deploy to the robot.
+- `asset/` — Authoritative STCM maps and the pinned Tianyi model contract.
+- `data/` — Recorder-format Tianyi poses, actions, and NPZ trajectories.
 - `output/` — Generated maps, robot snapshots, identity cache, and audio for debugging.
 
 ## Installation
@@ -37,7 +38,6 @@ Set the robot REST API address in `.env` (the default is shown below):
 
 ```env
 SLAM_BASE_URL=http://192.168.11.1:1448
-ROBOT_ACTION_BASE_URL=http://127.0.0.1:8765
 ```
 
 The API must be reachable from the machine that runs the UI.
@@ -45,6 +45,7 @@ The API must be reachable from the machine that runs the UI.
 ## Run the UI
 
 ```bash
+source /opt/ros/humble/setup.bash
 .venv/bin/python app/ui_guide/ui_main.py
 ```
 
@@ -53,36 +54,47 @@ Use the UI in four steps:
 1. **Map Building** — Identify the active map, switch to an `asset/` map, sync
    the current single-floor map, save a debug snapshot, or build a new map.
 2. **POI Management** — Record and manage POIs.
-3. **Task Design** — Create a task, choose POIs, add TTS content, and optionally
-   select a validated Tianyi concierge action to run before speech.
-4. **Task Execution** — Confirm physical body actions for the run, then run,
+3. **Task Design** — Create a task and give every POI TTS content plus an
+   optional ordered list of validated Tianyi arm actions to run during speech.
+4. **Task Execution** — Confirm physical arm actions for the run, then run,
    stop, resume, or manually control the robot.
 
 Make sure the robot is ready before starting movement.
 
 ## Tianyi concierge actions
 
-Tianyi body actions run through the separate `robot-action` process. Start the
-hardware bridge and action API manually before opening Robot Guide:
+Robot Guide reads the same JSON and NPZ format as `tianyi-action-recorder` and
+publishes the two arms directly through the vendor ROS 2 topics:
+
+- status: `/arm/status`
+- command: `/arm/cmd_pos`
+- commanded motors: 11-17 and 21-27 only
+
+No `tianyi_hw_bridge` or separate action service is used. The vendor body-control
+node must already provide both topics. Check the direct runtime without sending
+commands:
 
 ```bash
-~/workspace/launch/launch_tianyi_hw_bridge.sh --detached
-~/workspace/launch/launch_robot_action_service.sh --detached
+source /opt/ros/humble/setup.bash
+.venv/bin/python -m component.common.tianyi_arm_runtime
 ```
 
-The action catalog is intentionally limited to generated trajectories with a
-matching successful MuJoCo report. The supplied concierge definitions all use
-the sequence `concierge_init -> concierge_xxx -> concierge_init`. Generate or
-regenerate them from the saved poses in the `robot-action` checkout:
+The local artifact structure mirrors `tianyi-action-recorder`: model files are
+under `asset/tianyi2/`, with action JSON, pose JSON, and NPZ files under
+`data/actions/`, `data/poses/`, and `data/trajectories/`. Only complete actions
+that pass the model, schema, pose-sequence, timing, and joint-limit checks appear
+in Task Design.
 
-```bash
-cd ~/workspace/services/robot-action
-.venv/bin/python -m app.build_concierge_actions --overwrite
-```
-
-The Guide executor never overlaps base navigation and body motion. A failed or
-cancelled body action keeps the base at the current POI because the arms may not
-have returned to `concierge_init`.
+Every task moves the arms to `concierge_init` before the first navigation. At
+each POI it starts the ordered action sequence and prepared speech concurrently.
+Actions play one by one in the configured order, and the POI completes only
+after both the full sequence and speech finish. Every action verifies its return
+to `concierge_init`. Base navigation never overlaps with arm motion or POI
+speech. If a POI has no actions, the arms remain at `concierge_init` throughout
+its speech. An initialization failure prevents departure; an action failure keeps
+the base at the current POI. A guide may start from the base's current position;
+the preflight still requires a bound home dock so completion and recoverable
+failures can return the robot home.
 
 The map selector intentionally lists only `asset/*.stcm`. Files downloaded to
 `output/` are test/debug artifacts and cannot be activated from the UI. Map

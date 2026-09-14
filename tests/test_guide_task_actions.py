@@ -5,10 +5,42 @@ from component.common.guide_task import GuideTask
 
 
 class GuideTaskActionTests(unittest.TestCase):
-    def test_action_round_trips_with_stop(self):
+    def test_ordered_actions_round_trip_with_stop(self):
         value = {
             "id": str(uuid4()),
             "name": "Concierge tour",
+            "stops": [
+                {
+                    "poi_id": str(uuid4()),
+                    "poi_name": "Reception",
+                    "content": "Welcome",
+                    "actions": [
+                        {
+                            "action_id": "concierge_welcome",
+                            "phase": "with_speech",
+                            "required": True,
+                        },
+                        {
+                            "action_id": "concierge_point",
+                            "phase": "with_speech",
+                            "required": True,
+                        },
+                    ],
+                }
+            ],
+        }
+
+        task = GuideTask.from_dict(value, require_stops=True)
+
+        self.assertEqual(
+            task.to_dict()["stops"][0]["actions"],
+            value["stops"][0]["actions"],
+        )
+
+    def test_legacy_before_speech_phase_is_normalized(self):
+        value = {
+            "id": str(uuid4()),
+            "name": "Legacy concierge tour",
             "stops": [
                 {
                     "poi_id": str(uuid4()),
@@ -25,7 +57,8 @@ class GuideTaskActionTests(unittest.TestCase):
 
         task = GuideTask.from_dict(value, require_stops=True)
 
-        self.assertEqual(task.to_dict()["stops"][0]["action"], value["stops"][0]["action"])
+        self.assertEqual(task.stops[0].actions[0].phase, "with_speech")
+        self.assertNotIn("action", task.to_dict()["stops"][0])
 
     def test_existing_stop_without_action_remains_valid(self):
         value = {
@@ -43,6 +76,7 @@ class GuideTaskActionTests(unittest.TestCase):
         task = GuideTask.from_dict(value, require_stops=True)
 
         self.assertNotIn("action", task.to_dict()["stops"][0])
+        self.assertEqual(task.to_dict()["stops"][0]["actions"], [])
 
     def test_unknown_action_phase_is_rejected(self):
         value = {
@@ -53,10 +87,12 @@ class GuideTaskActionTests(unittest.TestCase):
                     "poi_id": str(uuid4()),
                     "poi_name": "Reception",
                     "content": "Welcome",
-                    "action": {
-                        "action_id": "concierge_welcome",
-                        "phase": "during_navigation",
-                    },
+                    "actions": [
+                        {
+                            "action_id": "concierge_welcome",
+                            "phase": "during_navigation",
+                        }
+                    ],
                 }
             ],
         }

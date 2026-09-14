@@ -14,14 +14,12 @@ class GuideExecutionPreflight:
     def _resolve_and_check_actions(self, task):
         resolved = self.task_designer.resolve_task(task)
         action_ids = {
-            stop["action"]["action_id"]
+            action["action_id"]
             for stop in resolved["stops"]
-            if stop.get("action") is not None
+            for action in stop.get("actions", [])
         }
-        if not action_ids:
-            return resolved
         if self.body_actions is None:
-            raise RuntimeError("Robot Action service is not configured")
+            raise RuntimeError("Direct Tianyi arm runtime is not configured")
         available = {
             action["action_id"] for action in self.body_actions.list_actions()
         }
@@ -66,8 +64,7 @@ class GuideExecutionPreflight:
                 f"Localization quality is too low: {quality} < {min_quality}"
             )
 
-        power = self.slam.home_dock.require_on_dock()
-        self.slam.power.require_charging(status=power)
+        power = self.slam.power.get_status()
         home_dock = self.slam.home_dock.require_bound_home_dock()
         return {
             "task": self._resolve_and_check_actions(task),

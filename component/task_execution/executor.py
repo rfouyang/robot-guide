@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import threading
+from concurrent.futures import ThreadPoolExecutor, wait
 from pathlib import Path
 
 from loguru import logger
@@ -88,6 +89,54 @@ class GuideTaskExecutor:
             logger.warning(f"Could not cancel the active Tianyi body action: {exc}")
             return False
 
+    def _perform_action_and_speech(
+        self,
+        body_actions,
+        body_arm_token,
+        audio_path,
+    ):
+        """Run one POI's arm action and prepared speech concurrently."""
+        start_event = threading.Event()
+
+        def execute_action():
+            start_event.wait()
+            results = []
+            for body_action in body_actions:
+                self._check_cancelled()
+                results.append(
+                    self.body_actions.execute(
+                        body_action["action_id"],
+                        body_arm_token,
+                        self._cancel_event,
+                    )
+                )
+            return results
+
+        def play_speech():
+            start_event.wait()
+            return self.speech.play(audio_path)
+
+        with ThreadPoolExecutor(
+            max_workers=2,
+            thread_name_prefix="guide-poi",
+        ) as executor:
+            action_future = executor.submit(execute_action)
+            speech_future = executor.submit(play_speech)
+            start_event.set()
+            wait((action_future, speech_future))
+
+        action_error = action_future.exception()
+        speech_error = speech_future.exception()
+        if action_error is not None:
+            # The arms may not have returned to concierge_init. Keep the base
+            # stationary until an operator verifies the body state.
+            self._stop_requested.set()
+            if speech_error is not None:
+                logger.error(f"POI speech also failed: {speech_error}")
+            raise action_error
+        if speech_error is not None:
+            raise speech_error
+
     @staticmethod
     def _event(status, message, task, **kwargs):
         return {
@@ -99,6 +148,7 @@ class GuideTaskExecutor:
             "stop_count": len(task["stops"]),
             "poi_name": kwargs.get("poi_name"),
             "action_id": kwargs.get("action_id"),
+            "action_ids": kwargs.get("action_ids"),
             "error": kwargs.get("error"),
         }
 
@@ -325,7 +375,6 @@ class GuideTaskExecutor:
         options = self.options.with_overrides(**kwargs)
         departed = False
         body_arm_token = None
-        body_prepared = False
         task = None
         start_stop_index = 0
         try:
@@ -356,20 +405,19 @@ class GuideTaskExecutor:
             task = preflight["task"]
             action_ids = sorted(
                 {
-                    stop["action"]["action_id"]
+                    action["action_id"]
                     for stop in task["stops"]
-                    if stop.get("action") is not None
+                    for action in stop.get("actions", [])
                 }
             )
-            if action_ids:
-                if kwargs.get("body_actions_confirmed") is not True:
-                    raise PermissionError(
-                        "Confirm physical Tianyi body actions before running this task"
-                    )
-                body_arm_token = self.body_actions.arm(
-                    action_ids,
-                    confirmed=True,
+            if kwargs.get("body_actions_confirmed") is not True:
+                raise PermissionError(
+                    "Confirm physical Tianyi arm actions before running this task"
                 )
+            body_arm_token = self.body_actions.arm(
+                action_ids,
+                confirmed=True,
+            )
             if start_stop_index >= len(task["stops"]):
                 raise RuntimeError("The selected task has no remaining POIs")
             if not resume:
@@ -385,6 +433,14 @@ class GuideTaskExecutor:
                     stop_index=start_stop_index + 1,
                     poi_name=next_stop["poi_name"],
                 )
+
+            yield self._event(
+                "body_preparing",
+                "Moving the Tianyi arms to concierge_init before navigation",
+                task,
+            )
+            self.body_actions.prepare(body_arm_token)
+            self._check_cancelled()
 
             if resume:
                 yield self._event(
@@ -416,7 +472,7 @@ class GuideTaskExecutor:
                 yield self._event(
                     "departing",
                     (
-                        "Leaving the charging dock through planned navigation "
+                        "Starting planned navigation from the current position "
                         f"to {first_stop['poi_name']}"
                     ),
                     task,
@@ -459,52 +515,32 @@ class GuideTaskExecutor:
                         )
                 self._check_cancelled()
 
-                body_action = stop.get("action")
-                if body_action is not None:
-                    if body_arm_token is None:
-                        raise RuntimeError("Tianyi body-action authorization is missing")
-                    if not body_prepared:
-                        yield self._event(
-                            "body_preparing",
-                            "Moving the Tianyi body to concierge init pose",
-                            task,
-                            stop_index=stop_index,
-                            poi_name=stop["poi_name"],
-                            action_id=body_action["action_id"],
-                        )
-                        self.body_actions.prepare(body_arm_token)
-                        body_prepared = True
-                        self._check_cancelled()
-                    yield self._event(
-                        "body_action",
-                        f"Performing {body_action['action_id']}",
-                        task,
-                        stop_index=stop_index,
-                        poi_name=stop["poi_name"],
-                        action_id=body_action["action_id"],
-                    )
-                    try:
-                        self.body_actions.execute(
-                            body_action["action_id"],
-                            body_arm_token,
-                            self._cancel_event,
-                        )
-                    except Exception:
-                        # The arms may not have returned to concierge_init. Keep the
-                        # base stationary until an operator verifies the body state.
-                        self._stop_requested.set()
-                        raise
-                    self._check_cancelled()
-
+                body_actions = stop["actions"]
+                if body_arm_token is None:
+                    raise RuntimeError("Tianyi body-action authorization is missing")
+                stop_action_ids = [action["action_id"] for action in body_actions]
+                action_message = (
+                    f"Performing {' -> '.join(stop_action_ids)} and speaking"
+                    if stop_action_ids
+                    else "Keeping arms at concierge_init and speaking"
+                )
                 yield self._event(
-                    "speaking",
-                    f"Speaking at {stop['poi_name']}",
+                    "performing_stop",
+                    (
+                        f"{action_message} at {stop['poi_name']}"
+                    ),
                     task,
                     stop_index=stop_index,
                     poi_name=stop["poi_name"],
+                    action_id=stop_action_ids[0] if stop_action_ids else None,
+                    action_ids=stop_action_ids,
                 )
                 self._check_cancelled()
-                self.speech.play(audio_path)
+                self._perform_action_and_speech(
+                    body_actions,
+                    body_arm_token,
+                    audio_path,
+                )
                 self._check_cancelled()
                 self._checkpoint.next_stop_index = stop_index
                 yield self._event(

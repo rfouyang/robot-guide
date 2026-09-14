@@ -46,15 +46,120 @@ class GuideTaskDesignState:
             [
                 index,
                 stop["poi_name"],
-                (
-                    stop.get("action", {}).get("action_id", "")
-                    if stop.get("action")
-                    else ""
+                " -> ".join(
+                    action["action_id"] for action in stop.get("actions", [])
                 ),
                 stop["content"],
             ]
             for index, stop in enumerate(draft.get("stops", []), start=1)
         ]
+
+    @staticmethod
+    def action_rows(actions):
+        return [
+            [index, action["action_id"]]
+            for index, action in enumerate(actions or [], start=1)
+        ]
+
+    @staticmethod
+    def action_buttons(selected_index, action_count):
+        selected = selected_index is not None and 0 <= selected_index < action_count
+        return (
+            gr.update(interactive=selected and selected_index > 0),
+            gr.update(interactive=selected and selected_index < action_count - 1),
+            gr.update(interactive=selected),
+        )
+
+    def action_editor_state(self, actions=None, selected_index=None, message=None):
+        actions = copy.deepcopy(actions or [])
+        selected = (
+            selected_index is not None and 0 <= selected_index < len(actions)
+        )
+        move_up, move_down, remove = self.action_buttons(
+            selected_index if selected else None,
+            len(actions),
+        )
+        if message is None:
+            message = (
+                f"Selected action {selected_index + 1}: "
+                f"**{actions[selected_index]['action_id']}**"
+                if selected
+                else "Add actions in playback order, then select a row to reorder it."
+            )
+        return (
+            actions,
+            self.action_rows(actions),
+            selected_index if selected else None,
+            message,
+            move_up,
+            move_down,
+            remove,
+        )
+
+    def add_action(self, actions, action_id):
+        action_id = str(action_id or "").strip()
+        if not action_id:
+            raise gr.Error("Choose a Tianyi arm action to add")
+        actions = copy.deepcopy(actions or [])
+        actions.append(
+            {
+                "action_id": action_id,
+                "phase": "with_speech",
+                "required": True,
+            }
+        )
+        return (
+            gr.update(value=None),
+            *self.action_editor_state(
+                actions,
+                len(actions) - 1,
+                "Action added. Update the selected POI or add the new POI.",
+            ),
+        )
+
+    def select_action(self, actions, evt: gr.SelectData):
+        if not evt.selected:
+            return self.action_editor_state(actions)[2:]
+        raw_index = evt.index[0] if isinstance(evt.index, (tuple, list)) else evt.index
+        try:
+            selected_index = int(raw_index)
+        except (TypeError, ValueError) as exc:
+            raise gr.Error("Could not determine the selected action") from exc
+        return self.action_editor_state(actions, selected_index)[2:]
+
+    def move_action(self, actions, selected_index, direction):
+        actions = copy.deepcopy(actions or [])
+        if selected_index is None or not 0 <= selected_index < len(actions):
+            raise gr.Error("Select an action in the sequence first")
+        new_index = selected_index + direction
+        if not 0 <= new_index < len(actions):
+            return self.action_editor_state(
+                actions,
+                selected_index,
+                "Action is already at the edge.",
+            )
+        actions[selected_index], actions[new_index] = (
+            actions[new_index],
+            actions[selected_index],
+        )
+        return self.action_editor_state(
+            actions,
+            new_index,
+            "Action order changed. Update the selected POI or add the new POI.",
+        )
+
+    def remove_action(self, actions, selected_index):
+        actions = copy.deepcopy(actions or [])
+        if selected_index is None or not 0 <= selected_index < len(actions):
+            raise gr.Error("Select an action in the sequence first")
+        removed = actions.pop(selected_index)
+        return self.action_editor_state(
+            actions,
+            message=(
+                f"Removed {removed['action_id']}. Update the selected POI or "
+                "add the new POI."
+            ),
+        )
 
     @staticmethod
     def selection_buttons(selected_index, stop_count):
@@ -73,6 +178,7 @@ class GuideTaskDesignState:
             None,
             len(draft["stops"]),
         )
+        action_editor = self.action_editor_state()
         return (
             draft.get("name", ""),
             draft,
@@ -80,6 +186,7 @@ class GuideTaskDesignState:
             None,
             gr.update(value=None),
             gr.update(value=None),
+            *action_editor,
             "",
             "Select a stop to edit or reorder it.",
             message,
@@ -170,18 +277,16 @@ class GuideTaskDesignState:
             selected_index if selected else None,
             len(stops),
         )
+        action_editor = self.action_editor_state(
+            selected.get("actions", []) if selected else []
+        )
         return (
             draft,
             self.sequence_rows(draft),
             selected_index if selected else None,
             gr.update(value=selected["poi_id"] if selected else None),
-            gr.update(
-                value=(
-                    selected.get("action", {}).get("action_id")
-                    if selected and selected.get("action")
-                    else None
-                )
-            ),
+            gr.update(value=None),
+            *action_editor,
             selected["content"] if selected else "",
             (
                 f"Selected stop {selected_index + 1}: **{selected['poi_name']}**"
@@ -195,19 +300,19 @@ class GuideTaskDesignState:
             update,
         )
 
-    def add_stop(self, draft, poi_id, action_id, content):
+    def add_stop(self, draft, poi_id, actions, content):
         content = str(content or "").strip()
         if not content:
             raise gr.Error("Enter the content the robot should speak at this POI")
+        actions = copy.deepcopy(actions or [])
         poi = self.resolve_poi(poi_id)
         draft = copy.deepcopy(draft or self.empty_draft())
-        stop = {"poi_id": poi["id"], "poi_name": poi["name"], "content": content}
-        if action_id:
-            stop["action"] = {
-                "action_id": str(action_id),
-                "phase": "before_speech",
-                "required": True,
-            }
+        stop = {
+            "poi_id": poi["id"],
+            "poi_name": poi["name"],
+            "content": content,
+            "actions": actions,
+        }
         draft.setdefault("stops", []).append(stop)
         return (
             *self.draft_edit_state(
@@ -233,12 +338,13 @@ class GuideTaskDesignState:
             message=f"Selected stop {selected_index + 1}.",
         )[2:]
 
-    def update_stop(self, draft, selected_index, poi_id, action_id, content):
+    def update_stop(self, draft, selected_index, poi_id, actions, content):
         if selected_index is None:
             raise gr.Error("Select a stop in the sequence first")
         content = str(content or "").strip()
         if not content:
             raise gr.Error("Enter the content the robot should speak at this POI")
+        actions = copy.deepcopy(actions or [])
         poi = self.resolve_poi(poi_id)
         draft = copy.deepcopy(draft or self.empty_draft())
         if not 0 <= selected_index < len(draft.get("stops", [])):
@@ -247,13 +353,8 @@ class GuideTaskDesignState:
             "poi_id": poi["id"],
             "poi_name": poi["name"],
             "content": content,
+            "actions": actions,
         }
-        if action_id:
-            stop["action"] = {
-                "action_id": str(action_id),
-                "phase": "before_speech",
-                "required": True,
-            }
         draft["stops"][selected_index] = stop
         return (
             *self.draft_edit_state(

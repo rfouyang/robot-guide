@@ -15,7 +15,7 @@ def _uuid(value, label: str) -> str:
 @dataclass(frozen=True)
 class GuideBodyAction:
     action_id: str
-    phase: str = "before_speech"
+    phase: str = "with_speech"
     required: bool = True
 
     @classmethod
@@ -25,8 +25,10 @@ class GuideBodyAction:
         action_id = str(value.get("action_id") or "").strip()
         if not action_id:
             raise ValueError("Guide body action ID is required")
-        phase = str(value.get("phase") or "before_speech").strip()
-        if phase != "before_speech":
+        phase = str(value.get("phase") or "with_speech").strip()
+        if phase == "before_speech":
+            phase = "with_speech"
+        if phase != "with_speech":
             raise ValueError(f"Unsupported guide body action phase: {phase}")
         required = value.get("required", True)
         if not isinstance(required, bool):
@@ -46,7 +48,7 @@ class GuideStop:
     poi_id: str
     poi_name: str
     content: str
-    action: GuideBodyAction | None = None
+    actions: list[GuideBodyAction] = field(default_factory=list)
 
     @classmethod
     def from_dict(cls, value: dict) -> "GuideStop":
@@ -59,18 +61,22 @@ class GuideStop:
             raise ValueError("Each task stop must have a POI name")
         if not content:
             raise ValueError(f"Arrival content is required for POI '{poi_name}'")
-        raw_action = value.get("action")
-        action = None if raw_action is None else GuideBodyAction.from_dict(raw_action)
-        return cls(poi_id, poi_name, content, action)
+        raw_actions = value.get("actions")
+        if raw_actions is None:
+            legacy_action = value.get("action")
+            raw_actions = [] if legacy_action is None else [legacy_action]
+        if not isinstance(raw_actions, list):
+            raise ValueError("Guide stop actions must be a list")
+        actions = [GuideBodyAction.from_dict(action) for action in raw_actions]
+        return cls(poi_id, poi_name, content, actions)
 
     def to_dict(self) -> dict:
         value = {
             "poi_id": self.poi_id,
             "poi_name": self.poi_name,
             "content": self.content,
+            "actions": [action.to_dict() for action in self.actions],
         }
-        if self.action is not None:
-            value["action"] = self.action.to_dict()
         return value
 
 
